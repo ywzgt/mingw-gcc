@@ -1,0 +1,117 @@
+name: mingw gcc
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    strategy:
+      matrix:
+        arch: [i686, x86_64]
+        threads: [posix, mcf, win32]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    - name: Prepare
+      run: sed -i '$aTHREADS=${{matrix.threads}}' envars.sh; ./prepare ${{ matrix.arch }}
+    - name: Bootstrap
+      run: ./chroot_run bash build.sh ${{ matrix.arch }} bootstrap
+    - name: Build pass1
+      run: ./chroot_run bash build.sh ${{ matrix.arch }}
+    - name: Build pass2
+      run: ./chroot_run bash build.sh ${{ matrix.arch }}; [ ! -f rootfs/ENV ] || cat rootfs/ENV >> $GITHUB_ENV
+    - name: Package
+      if: env.PKG != ''
+      run: (cd $PKG; sudo tar cf - .|xz -T0) > mingw-gcc-${{ env.gcc_ver }}-ucrt-${{ matrix.arch }}.tar.xz
+    - name: Upload to Releases
+      if: env.BUILD_DATE != '' && env.PKG != ''
+      uses: softprops/action-gh-release@v2
+      with:
+        body_path: rootfs/Description
+        tag_name: ${{ env.BUILD_DATE }}
+        files: mingw-gcc-${{ env.gcc_ver }}-ucrt-${{ matrix.arch }}.tar.xz
+        fail_on_unmatched_files: true
+    - name: Setup tmate ssh session
+      if: failure()
+      uses: mxschmitt/action-tmate@v3
+      timeout-minutes: 30
+
+  test:
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        arch: [i686, x86_64]
+        build: [ffmpeg, gcc, openssl]
+        threads: [posix, mcf, win32]
+        exclude:
+          - build: ffmpeg
+            threads: mcf
+          - build: ffmpeg
+            threads: win32
+          - build: openssl
+            threads: mcf
+          - build: openssl
+            threads: win32
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    - name: Prepare
+      run: sed -i '$aTHREADS=${{matrix.threads}}' envars.sh; ./prepare ${{ matrix.arch }} binary
+    - name: Build
+      run: ./chroot_run bash build.sh ${{ matrix.arch }} test ${{ matrix.build }}; [ ! -f rootfs/ENV ] || cat rootfs/ENV >> $GITHUB_ENV
+    - name: Package
+      if: env.PKG != ''
+      run: (cd $PKG; sudo tar cf - .|xz -T0) > ${{ matrix.build }}${{ env.pkgver }}-${{ matrix.arch }}.tar.xz
+    - uses: actions/upload-artifact@v4
+      if: env.PKG != ''
+      with:
+        name: ${{ matrix.build }}-${{ matrix.arch }}-${{ matrix.threads }}
+        path: ${{ matrix.build }}-*.tar.xz
+        retention-days: 30
+        overwrite: true
+    - name: Upload to Releases
+      if: matrix.build == 'gcc' && env.PKG != ''
+      uses: softprops/action-gh-release@v2
+      with:
+        body: GCC binaries for windows
+        tag_name: ${{ env.BUILD_DATE }}-win
+        files: ${{ matrix.build }}${{ env.pkgver }}-${{ matrix.arch }}.tar.xz
+        fail_on_unmatched_files: true
+        prerelease: true
+    - name: Release artifacts x86
+      if: matrix.arch == 'i686' || matrix.arch == 'x86_64'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: artifacts
+        files: ${{ matrix.build }}*-${{ matrix.arch }}.tar.xz
+        fail_on_unmatched_files: true
+        prerelease: true
+    - name: Setup tmate ssh session
+      if: failure()
+      uses: mxschmitt/action-tmate@v3
+      timeout-minutes: 30
+
+  test-run:
+    runs-on: windows-latest
+    needs: test
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+    - uses: msys2/setup-msys2@v2
+      with:
+        update: true
+        install: p7zip
+    - name: Run
+      run: ./test_run.sh
+    - name: Setup tmate ssh session
+      if: failure()
+      uses: mxschmitt/action-tmate@v3
+      timeout-minutes: 10
